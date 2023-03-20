@@ -1,0 +1,616 @@
+Asynchronous Neural Networks
+for Learning in Graphs
+Lukas Faber
+ETH Zurich, Switzerland
+lfaber@ethz.ch
+Roger Wattenhofer
+ETH Zurich, Switzerland
+wattenhofer@ethz.ch
+Abstract
+This paper studies asynchronous message passing (AMP), a new paradigm for
+applying neural network based learning to graphs. Existing graph neural networks
+use the synchronous distributed computing model and aggregate their neighbors
+in each round, which causes problems such as oversmoothing and limits their
+expressiveness. On the other hand, AMP is based on the asynchronous model,
+where nodes react to messages of their neighbors individually. We prove that
+(i) AMP can simulate synchronous GNNs and that (ii) AMP can theoretically
+distinguish any pair of graphs. We experimentally validate AMP’s expressiveness.
+Further, we show that AMP might be better suited to propagate messages over large
+distances in graphs and performs well on several graph classification benchmarks.
+1 Introduction
+Graph Neural Networks (GNNs) have become the de-facto standard model for applying neural
+networks to graphs in many domains [6; 18; 20; 24; 26; 49; 53]. Internally, nodes in GNNs use
+message passing, they communicate with their neighboring nodes for multiple synchronous rounds.
+We believe that the way GNNs realize this communication is not ideal. In GNNs, all nodes speak
+concurrently, and a node does not listen to individual neighbors but only to an aggregated message of
+all neighbors. In contrast, humans politely listen when a neighbor speaks, then decide whether the
+information was relevant, and what information to pass on.
+The way humans communicate is in line with the asynchronous communication model [37]. In the
+asynchronous model, nodes do not communicate concurrently. In fact, a node only acts initially or
+when it receives a message. If a node receives a new message from one of its neighbors, it updates
+its state, and then potentially sends a message on it own. This allows nodes to listen to individual
+neighbors and not only to aggregations. Figure 1 illustrates how this interaction can play out.
+Figure 1: Detection of an alcohol (a C atom with an OH group) with AMP. H atoms send a message
+to their neighbors. Every node can choose to ignore the message or react to it. The C atom is not
+interested in H neighbors and discards the message. On the other hand, the O atom reacts and sends a
+message on its own. This message is now relevant to the C atom.
+Preprint. Under review.
+arXiv:2205.12245v1 [cs.LG] 24 May 2022
+We make the following contributions.
+• We introduce AMP, a new paradigm for learning neural architectures in graphs. Instead of nodes
+acting synchronously in rounds, nodes in AMP interact asynchronously by exchanging and reacting
+to individual messages.
+• We theoretically examine the expressive power of AMP. Our two main results are that in principle
+(i) AMPs can simulate GNNs and that (ii) AMP with message delays can go beyond all WeisfeilerLehman tests [44] and solve any graph isomorphism problem.
+• We examine how AMP can transmit information to far-away nodes. Since AMP handles messages
+individually and is not limited by the number of communication rounds, AMP can combat the
+underreaching, oversmoothing, and oversquashing problems that traditional GNNs encounter when
+propagating information over long distances (many layers).
+• We run experiments on (i) established GNN expressiveness benchmarks to demonstrate that AMP
+outperforms all existing methods in distinguishing graphs beyond the 1−WL algorithm. We
+introduce (ii) synthetic datasets to show that AMP is well suited to propagate information over
+large distances. Finally, we study (iii) established graph classification benchmarks to show that
+AMP performs comparably to existing GNNs in classification accuracy.
+2 Related Work
+Virtually all GNNs follow the synchronous message passing framework of distributed computing,
+first suggested by Gilmer et al. [18] and Battaglia et al. [4]. The underlying idea is that nodes have an
+embedding and operate in rounds. In each round, every node computes a message and passes the
+message to every adjacent node. Then, every node aggregates the messages it receives and uses the
+aggregation to update its embedding. There exist variations of this framework. For example, edges
+can also have embeddings, or one can add a global sharing node to allow far away nodes to directly
+share information [4]. Following the initial work of Scarselli et al. [43], different implementations
+for the individual steps in the message passing framework exist, e.g., [7; 20; 26; 34; 49; 55; 56].
+However, these GNN architectures all experience common problems:
+Oversmoothing. A problem that quickly emerged with GNNs is that we cannot have many GNN
+layers [28; 29]. Each layer averages and hence smooths the neighborhood information and the node’s
+features. This effect leads to features converging after some layers [35], which is known as the
+oversmoothing problem. Several works address the oversmoothing problem, for example by sampling
+nodes and edges to use in message passing [15; 21; 38], leveraging skip connections [10; 55], or
+additional regularization terms [9; 61; 62]. Thanks to its asynchrony, AMP does not average over
+neighborhood messages and is not exposed to the oversmoothing problem.
+Underreaching. Using normal GNN layers, a GNN with k layers only learns about nodes at most k
+hops away. A node cannot act correctly if it would need information that is k + 1 hops away. This
+problem is called underreaching [3]. There exist counter measures, for example, having a global
+exchange of features [18; 54] or spreading information using diffusion processes [27; 43]. Methods
+that help against oversmoothing are usually also applied against underreaching, since we can use
+more layers and increase the neighborhood size. In AMP, because of asynchrony, some nodes can be
+involved in the computation/communication much more often than others; this helps AMP to gather
+information from further away, which is a countermeasure against underreaching.
+Oversquashing. In many graphs, the size of k−hop neighborhoods grows substantially with k. This
+requires squashing more and more information into a node embedding of static size. Eventually
+this leads to the congestion problem (too much information having to pass through a bottleneck)
+that is well known in distributed computing (e.g. [40]) and goes by the name of oversquashing for
+GNNs [1; 47]. One approach to solve oversquashing is introducing additional edges that function
+as shortcuts to non-direct neighbors [8]. Dropping-based methods [15; 21; 38] that help against
+oversmoothing can also reduce oversquashing by reducing the size of the neighborhoods. AMP is
+again naturally more resilient than synchronous GNNs, since information can be transferred in a
+more guided fashion.
+1−WL Limit. Xu et al. [56] and Morris et al. [33] show that GNNs are limited in their expressiveness
+by the 1−Weisfeiler-Lehman test (1−WL), a heuristic algorithm to evaluate graph isomorphism [44].
+Hoever, there exist simple structures that the 1−WL test cannot distinguish that we want to detect with
+2
+GNNs [16]. Therefore, several augmentations to GNNs exist that include additional features, such as
+ports, IDs, or angles between edges for chemistry datasets [17; 30; 41; 42], run multiple rounds over
+slight perturbations of the same graph [5; 36; 51], or use higher-order information [11; 32; 33]. Since
+in AMP nodes do not act at the same time, they can be distinguished more easily. We show that AMP
+can handle 1−WL and higher order WL, in principle even graph isomorphism.
+We believe these four classic GNN problems have their root cause in the synchronous aggregation of
+(almost) all neighbors. The aggregation smooths the neighborhood features, and nodes are exposed
+to all the information in their increasing k − hop neighborhood. This limits the number of rounds,
+causing underreaching. If nodes with identical neighbors act synchronously, they stay identical and
+within 1−WL expressiveness.
+There are two main approaches for distributed computing [37; 52]. In the synchronous approach, all
+nodes operate in synchronous rounds, and in each round each node sends a message to every neighbor.
+Sato et al. [41] and Loukas [30] show that current graph neural networks using message passing
+as in Gilmer et al. [18] follow this approach. The antipodal paradigm in distributed computing is
+the asynchronous model Peleg [37]. In the asynchronous model, nodes do not act at the same time.
+Instead nodes act on receiving a single message. If receiving a message, a node may change its
+internal state and potentially create new messages itself. Currently, all GNN approaches follow the
+synchronous message passing model. In this paper, we want to explore the efficacy of asynchronous
+message passing. So we ask a natural question: Is it possible, and is it worthwhile for GNNs to
+handle messages asynchronously and individually?
+3 The Asynchronous Model and its Challenges
+We illustrate the dynamics in AMP in Figures 1 and 2. Normally, AMP picks one node and sends
+it a special initial message to start the computation which looks as follows: A node is in a state h.
+Upon receiving a message m, a node can react to it and change its internal state. The node can then
+decide to emit a message m0
+itself based on its (potentially) new state. The node does not know
+how many and which other neighbor nodes will receive the message, therefore, m0 does not contain
+information about the receiver. If we look at the dynamics of one node in isolation, the behavior
+mimics that of sequence to sequence models [45] that have seen great popularity and success in
+Natural Language Processing. In principle, every node receives a sequence of messages that the node
+can use to create new internal states and produce a sequence of messages. The node does not need
+to produce a message in every step. For example, in Figure 2 the node sends no message in step
+i + 1. Compared to NLP sequence to sequence models, the asynchronous messaging passing must
+overcome two additional challenges:
+Unknown input sequences. In most sequence-to-sequence language models, we want to transform
+a known input sequence into an output sequence. In NLP, input sequences are often sentences and
+the sequence elements are words, for example, when we want to translate sentences. In such cases,
+the input sequence is entirely known at the start and sequence elements do not depend on each other.
+When a node v in AMP receives a message m0 it is not clear what the message m1 will be nor do
+we know which node will send it. Even worse, node v might emit a message m0
+0
+that influences the
+message m1 node v will receive later. This may happen since the outputs of node v are the inputs of
+its neighboring nodes. This mutual dependence between inputs and outputs makes learning harder.
+Partial information available. In natural language processing, the input sequence contains all the
+needed information to produce the target prediction. Consider again the translation setting, where
+sentences are inputs and words are sequence elements. Every word has access to the entire input
+sequence and thus all the information it needs. However, most nodes in graphs do not have access
+to all information they need. Figure 3 illustrates the problem with a simple example. The node on
+the right v needs to know if there is a red node in the graph. There is one such node, s. However, in
+between those two nodes are nodes t and u. For both t and u, the red node s is not important since
+t and u are only interested in the number of blue nodes. Therefore, if either t or u decide to not
+forward information about the red node, the information that s exists never reaches v and v cannot
+classify correctly. The takeaway from this example is that nodes not only need to understand what
+messages are important to them and how to use these messages, but nodes also need to identify the
+messages that are important to other nodes and propagate these messages.
+3
+hi−1
+mi−1
+m0
+i−1
+hi
+mi
+m0
+i
+hi+1
+mi+1
+hi+2
+mi+2
+m0
+i+2
+Figure 2: AMP dynamics for one node in isolation. The
+node receives a sequence of messages which it can use to
+update its state and (possibly, not always, e.g. hi+1) emit
+a sequence of messages.
+Figure 3: Node v needs a message
+from s but can only receive it if both
+t and u, which are not interested in
+s, forward the message.
+Long-Range Information Propagation. We now discuss how to propagate information in AMP,
+in particular over long distances. To send information to a node far away, many messages must be
+sent and received. This leads to many rollouts of the node update function. We know from recurrent
+neural networks that many rollouts can lead to slow and unstable training [23]. Therefore, we want to
+discuss several possible designs for the node update function.
+Recurrent Layers. One straightforward idea is to use layers that we know from recurrent neural
+networks. For example, we can use a simple feedforward layer as in recurrent neural networks (we
+call this architecture AMP-RNN). Gating is a useful concept in RNNs, therefore, we create variants
+of AMP that use the GRU [12] (AMP-GRU) or the LSTM [23] (AMP-LSTM). While gating allows
+a node to minimize the change in state for a non-relevant message, neither of these ideas allows a
+node to truly terminate. We will later show that this causes problems when we want to extrapolate
+the learned AMP variants to much larger graphs.
+Self-supervised termination. Therefore, we also study ideas for self-supervised termination in
+RNNs. Graves [19] introduce the idea of adaptive computation time (ACT). With ACT, a RNN
+can learn how many steps it wants to perform for each sequence element. Before every step, the
+model learns a halting probability and finishes when the sum of probabilities is sufficiently close to 1.
+AMP-ACT adopts this idea and computes halting probabilites for every message. If the sum of these
+halting probabilities is large enough, the node stops updating. Its final state is a probability-weighted
+average of all states. We experiment with another version, AMP-Iter, that is inspired by the IterGNN
+work of Tang et al. [46]. In IterGNN, nodes also compute a halting probability on every message.
+However, IterGNNs combine these probabilities multiplicatively instead of additively.
+4 Expressiveness of AMP
+4.1 AMP is at least as expressive as GNNs
+First, we examine the relationship between AMP and message passing GNNs. Our first main
+theoretical result is that AMP can simulate the execution of a GNN, showing that AMP is at least
+as powerful as GNNs. The proof idea follows the so-called α synchronizer [2]. The core concepts
+of the α synchronizer are pulses and safe nodes. Nodes emit a pulse when they start simulating the
+next synchronous round. A node is safe if every message it sent in the current pulse was received and
+processed by its neighbors. Nodes determine safety using acknowledgments messages. If a node and
+all its neighbors are safe, the node proceeds to the next pulse.
+For concreteness, we will simulate a simple version of GIN [56] that we call sGIN. sGIN uses the
+identity as message function, and nodes compute their new state by simply summing their neighbors’
+states, applying a linear layer on the sum and a ReLu activation afterward. Without loss of generality,
+we assume that every layer in sGIN has the same dimension d and that sGIN has a total of L layers.
+Our variant of AMP that mimics sGIN has states of size d + 3. The additional three entries store
+information required for the simulation: AMP stores the number of neighbors w for which the node
+is waiting for a message at the current pulse, the number of nodes u that are still unsafe at the current
+pulse, and the number of layers l left to simulate. We assume that all nodes in AMP know their
+degree D.
+1 Every node starts in the state (x, 0, 0, L), where x are the input features of sGIN.
+1This assumption simplifies the proof but does not provide additional information. Every node in AMP could
+also learn its degree by flooding the network once and storing the count in a state that is never modified again.
+4
+Nodes in AMP always send their old state s plus 3 additional bits for coordination as messages. The
+first two bits are the pulse bit to signal a new pulse and the safe bit to inform neighbors that the
+node became safe. Furthermore, we need an origin bit that is only set on the very first message
+which requires special handling. In every message, exactly one of these bits is set.
+Let a node have the state (s, w, u, l) and receive a message (m, pulse, safe, origin). Table 1
+describes the function f that computes an updated node state and a new message to send in return.
+The symbol ⊥ denotes that no message is sent.
+Condition s’ w’ u’ l’ message
+l=0 s w u l ⊥
+origin=1 s D-1 D l pulse
+u=0 m D-2 D l pulse
+safe=1 s w u-1 l ⊥
+w=0 ReLu(u(s+m)) 0 u-1 l-1 safe
+pulse=1 s+m w-1 u l ⊥
+Table 1: Update function f used by every node in AMP to simulate a synchronous GNN.
+Theorem 4.1. AMP can simulate sGIN.
+Proof. We prove by induction that when a node sends a new pulse, the node and its neighbors finished
+the previous pulse with the same state as sGIN. The statement holds at the beginning since nodes in
+sGIN and AMP start with the same features.
+Let us assume the statement holds and node v is about to emit a new pulse. Nodes emit pulses when
+they are in the third condition (the second condition is a special case for the very first message).
+Before v can send another pulse, its state entry u needs to become 0. For this, two things need to
+happen: v needs to receive a safe message from every neighbor (condition 4) and v needs to become
+safe itself. v becomes safe if it receives a message from every neighbor (condition 5) and updates
+the sum of these messages the same way as GIN. Note that this definition is slightly different from
+Awerbuch [2]: A node is safe when it processed every received message, not when every sent message
+was acknowledged. These two scenarios are equivalent. Thus, when v becomes safe, it has the same
+state as in sGIN before the next layer, the same is true for v’s neighbors.
+Note that the universal approximation theorem [39] tells us that we can model f to an arbitrarily
+close approximation using a neural network with at least two layers and non-linear activations and
+sufficient depth. Because f is a simple function of cascading ifs, we can exactly model f using three
+layers with a ReLu activation. For space reasons, we defer this construction to Appendix A.
+We can easily extend this construction to more complex GNN variants. For example, we can divide
+(u(s + m)) by D to use mean aggregation. We can also accumulate messages in separate features
+from the node state and allow the update to depend on both state and aggregated messages. Another
+variation is to normalize messages by the sender’s and receiver’s degree to emulate GCN [26].
+4.2 AMP with random message delays
+To understand the expressiveness in more detail, we need to distinguish two variants of AMP. In the
+first variant of AMP, we assume that message have a random delay before they arrive. For examples
+delays could be chosen uniformly in the interval [0,1]. Delays can act as a source of randomness,
+which makes this variant very powerful.
+Lemma 4.2. AMP with random message delays can create IDs for every node in a star graph in
+O(k · 6
+k
+) time, where k is the degree of the center node.
+We proof Lemma 4.2 in the Appendix. It is possible to generalize the star setting to general graphs.
+We send an arbitrary node an initial message that will start to distribute IDs in its induced star
+graph neighborhood. After this node assigns an ID to every neighbor, it makes the node with the
+next-highest ID the new center node who assigns IDs next. Some neighbors of the new center might
+already have an ID, only the ones without participate.
+5
+(a) (b) (c)
+Figure 4: Graphs that cannot be distinguished by 1−WL GNNs but by AMP.
+Corollary 4.3. AMP with random message delays can create unique node identifiers in every graph.
+Loukas [30] prove that a GNN with unique identifiers for every node, sufficiently wide and powerful
+layers, and sufficient depth is Turing complete. Theorem 4.2 allows us to build identifiers for every
+node even if there are none. Now, we can simulate a Turing complete GNN according to Theorem 4.1.
+This yields our main result on AMP’s expressiveness.
+Theorem 4.4. AMP with random message delays can distinguish any pair of graphs.
+4.3 AMP with constant message delays.
+Let us now consider the scenario that delays are not random but every message takes the same time
+to arrive. This model is less expressive since we do not have delays as a source of randomness.
+Therefore, we cannot create identifiers and distinguish arbitrary graphs. Nevertheless, this variant of
+AMP is more powerful than the 1−WL test. Figure 4 shows some motivational examples.
+The first example (Figure 4a) is one of the constructions from Garg et al. [16], where nodes have to
+learn if they are in the 4 node cycles or the larger 8 node cycle. In AMP, the node that starts can learn
+the cycle length and propagate the information to the rest of the graph. Furthermore, AMP can also
+distinguish graphs that impose constraints on the aggregation, for example, the graph in Figure 4b by
+Xu et al. [56]. Since AMP receives neighborhood messages individually, the white node can react
+differently to each message received by a blue node. The graph in Figure 4c is interesting. If we start
+the execution at any white or blue node, we can distinguish the two graphs easily. The top graph has
+a cycle of length 3 from this starting node while the bottom graph has not. However, AMP cannot
+distinguish the two graphs if we start both executions at the red nodes.
+Even though AMP with constant delays is less expressive, we found, it is easier to train. With constant
+delays, nodes receive the same messages in the same order across different runs, which reduces
+noise in the gradients. On the other hand, it takes many runs with random message delays to see a
+representative distribution of message orderings to produce a stable gradient signal. In the subsequent
+experiments, we will therefore use AMP with constant delays.
+5 Experiments
+5.1 Beyond 1-WL classification
+We experiment with AMP’s ability to classify graphs that the 1−WL test cannot distinguish. We compare on existing GNN expressiveness benchmarks for node classification (Limits1 [16], Limit2 [16],
+Triangles [42], and LCC [42]) and graph classification (4-cycles [30] and Skip-Cycles [11]). Furthermore, we include two constructions by Xu et al. [56] that are hard for particular aggregation and
+pooling functions — MAX for max aggregation and MEAN for mean aggregation.
+We compare AMP-RNN with several powerful GNN extensions from literature: PPGN [32],
+SMP [51],2 DropGNN [36],3
+and ESAN [5],4 plus a simple GIN [56] for control. We needed
+to slightly modify all codebases to accept different aggregation methods. We needed to further
+modify ESAN to create its graph perturbations inside the model to fit into the existing framework.
+For training, we follow the setup by Papp et al. [36]. GNNs have 4 layers, for Skip-Cycles, we
+additionally try 9 layers and take the better result. For AMP, we allow a total of 5n messages, with n
+being the size of the graph. Figure 4c shows that the starting node matters, so we execute multiple
+runs for AMP, one for every node with that node being the starting node. Each run computes the final
+2Code for SMP and PPGN from https://github.com/cvignac/SMP
+3Code for GIN and DropGNN from https://github.com/KarolisMart/DropGNN
+4Code for ESAN from https://github.com/beabevi/ESAN
+6
+embedding for the starting node. We use 16 hidden units for Limits1, Limits2, Triangles, LCC, and
+4-cycles and 32 units for MAX, MEAN, and Skip-Cycles. Training uses the Adam [25] optimizer
+with a learning rate of 0.01. Table 2 shows results on test graphs. We find that AMP performs
+Dataset GNN [56] PPGN [32] SMP [51] DropGNN [36] ESAN [5] AMP (ours)
+Limits1 [16] 0.50 ±0.00 0.60±0.21 0.95±0.16 1.00±0.00 1.00±0.00 1.00±0.00
+Limits2 [16] 0.50±0.00 0.85±0.24 1.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00
+Triangles [42] 0.52±0.15 1.00±0.02 0.97±0.11 0.93±0.13 1.00±0.01 1.00±0.01
+LCC [42] 0.38 ±0.08 0.80±0.26 0.95±0.17 0.99±0.02 0.96±0.06 0.96±0.03
+MAX [56] 0.05±0.00 0.36±0.16 0.74±0.24 0.27±0.07 0.05±0.00 1.00±0.00
+MEAN [56] 0.28±0.31 0.39±0.21 0.91±0.14 0.58±0.34 0.18±0.08 1.00±0.00
+4-cycles [30] 0.50±0.00 0.80±0.25 0.60±0.17 1.00±0.01 0.50±0.00 1.00±0.00
+Skip-Cycles [11] 0.10±0.00 0.04±0.07 0.27±0.05 0.82±0.28 0.40±0.16 1.00±0.00
+Table 2: Test set accuracy on GNN expressiveness benchmarks that require beyond 1−WL expressiveness to solve. AMP solves all benchmarks quasi-perfect, even the challenging ones that restrict
+the aggregation (MAX, MEAN) or require long-range propagation (Skip-Cycles).
+better than all other methods and consistently solves all datasets (close to) perfectly. Many methods
+perform very well on the node classification tasks. On the graph classification tasks, all methods
+but AMP struggle. This is particularly true for the two datasets with restrictions on the aggregation.
+However, sometimes it is desirable not to use sum as aggregation function. Other aggregations, such
+as max might offer better algorithmic alignment [57; 58]. Moreover, AMP solves the challenging
+Skip-Cycles dataset perfectly which requires long-range information propagation.
+5.2 Long-range information propagation
+In this section, we investigate the long-range information propagation of AMP. We experiment with
+a simplified version of finding shortest paths in graphs. Finding shortest paths is interesting for
+long-range information propagation since it requires reading the entire graph in the worst case and has
+been used previous works [46; 50; 58]. We simplify the shortest path setting: instead of regressing the
+exact distance, we classify if the shortest path is even or odd. We do this to abstract from the need to
+do accurate computation of distances. Neural networks struggle with these arithmetic computations
+in general [14; 22; 31; 48]. We compare AMP with several synchronous GNNs (IterGNNs [46],5
+Universal Transformers [13], and NEG (Neural Execution of Graph Algorithms [50]). For GNNs, we
+mark the starting node by giving it distinct features, for AMP, we sent this node the initial message.
+We train on 25 randomly create graphs with 10 trees. Graphs are based on a spanning tree to which
+we add n
+5
+extra edges. Training runs for 1000 iterations and uses the Adam optimizer with a learning
+rate of 0.01. The hidden size dimension is 30. While we train on graphs with size 10, we follow
+previous work [46; 50; 58] to test the ability to extrapolate the solution to larger graphs. We test with
+graphs of sizes 10, 15, 25, 50, 100, 250, 500, 1000. Larger graphs are also more challenging since the
+shortest paths grow in length. We report the classification accuracy per size in Table 3.
+We can see that all AMP version perform better than the synchronous baseline GNNs. AMP-Iter
+performs especially well. We hypothesize that this is because the asynchronous model aligns better
+with the given task. Every node only needs to act when there might be relevant information. On
+the other hand, nodes in the synchronous GNNs need to stay ready over many rounds until the
+information from the starting node finally reaches them. Xu et al. [57] and Xu et al. [58] have shown
+that better algorithmic alignment between the neural architecture and the task helps the model to
+learn with fewer samples and extrapolate better.
+We now investigate if we can understand the accuracy losses of Table 3 in terms of underreaching
+and oversmoothing. To estimate underreaching, we break down the accuracy by distance from the
+starting node. If accuracy decreases with increasing distance it suggests exposure to underreaching.
+Practically, since the label flips in every step we merge an odd and an even pair into one bucket. For
+example the scores for distances 1 and 2 are combined. Figure 5a shows the results broken down by
+distance. We can see that most all architectures except AMP-Iter and AMP-ACT cannot extrapolate
+5Code from IterGNN from https://github.com/haotang1995/IterGNN
+7
+Model 10 25 50 100 250 500 1000 2500
+NEG [50] 0.67±0.12 0.54±0.08 0.51±0.03 0.51±0.01 0.49±0.01 0.50±0.01 0.50±0.00 0.50±0.00
+Universal[13] 0.91±0.05 0.74±0.09 0.65±0.11 0.61±0.13 0.57±0.14 0.56±0.14 0.55±0.14 0.55±0.14
+IterGNN [46] 0.92±0.10 0.82±0.15 0.73±0.13 0.65±0.09 0.58±0.05 0.55±0.03 0.52±0.01 0.51±0.00
+AMP-RNN 0.96±0.02 0.85±0.05 0.74±0.08 0.69±0.07 0.61±0.09 0.58±0.09 0.56±0.05 0.54±0.04
+AMP-GRU 0.97±0.01 0.89±0.03 0.80±0.05 0.73±0.10 0.66±0.07 0.63±0.08 0.60±0.05 0.56±0.04
+AMP-LSTM 0.97±0.01 0.87±0.03 0.77±0.06 0.69±0.10 0.61±0.09 0.58±0.10 0.56±0.06 0.54±0.05
+AMP-ACT 1.00±0.00 0.98±0.02 0.96±0.04 0.95±0.05 0.93±0.07 0.91±0.10 0.91±0.11 0.90±0.12
+AMP-Iter 1.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00 0.99±0.00 0.99±0.00 0.99±0.00
+Table 3: Accuracy for predicting the parity of shortest paths to a starting node. The table head
+contains the number of nodes in the test graph while training is always on 10 nodes. AMP-Iter learns
+to extrapolate almost perfectly. Also other AMP variants extrapolate better than the GNN baselines.
+to much larger distances than the training set. This contributes largely to the decrease in accuracy
+since the larger graphs become, the more nodes have large distances to the starting node.
+To estimate oversmoothing, we restrict the accuracy measurement towards nodes whose distance
+to the starting node also is in the training set. If the accuracy relatively decreases, the presence of
+further away nodes impacts close-by nodes, which indicates oversmoothing. Figure 5b shows the
+results for this analysis. In principle, all models combat overmsoothing well except AMP-RNN.
+0 5 10 15 20
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+(a) Accuracy for the shortest path parity (y−axis). We
+break accuracy down by distance to the starting node
+(x−axis). The stronger accuracy declines for increasing x, the more a method is exposed to underreaching.
+10 25 50 100 250 500 1000 2500
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+(b) Accuracy for the shortest path parity (y−axis) but
+only for nodes with a distance the model saw in the
+training set for different graph sizes (x−axis). A declining accuracy suggests oversmoothing.
+Third we estimate the expose of different models to oversquashing. We compare the performance of
+the model when it has to solve the shortest path task to when it has to solve three shortest path tasks
+at the same time on the same graph. This triples the amount of information nodes need to exchange.
+Figure 6 shows the accuracy for the single problem, Figure 6b the accuracy for the triple problem.
+We see that all methods deteriorate in performance, which is expected since the learning task is
+harder. But we can see that different methods deteriorate in different speed. Again AMP-Iter and
+AMP-ACT perform best. Since nodes in AMP receive information for one problem at a time, they
+are less exposed to oversquashing. Learning to terminate also helps nodes to keep the information
+they learnt. Recurrent AMP variants perform worse than AMP-Iter and AMP-ACT and even worse
+than IterGNN and Universal. This suggests that learning to terminate is indeed a useful property.
+5.3 Graph Classification
+Last, we train AMP on several graph classification benchmarks. Our AMP implementation runs on a
+single CPU since the sequential nature limits GPU potential and python’s Global-Interpreter-Lock6
+prevents multithreading. This makes training larger datastes prohibitively slow for now (for example,
+PROTEINS takes around 1−2 day to train). Therefore we limit the comparison to the smaller datasets
+MUTAG, PTC, PROTEINS, IMDB-B, IMDB-M [59]. Further, we do a single pass in each training
+epoch instead of 50 batches of 50 graphs. We run AMP-RNN that does a short run from every node.
+We do a small grid search over the number of messages (15 or 25) per run, the size of the message
+embeddings (10 or half the node embedding size) and whether AMP-RNN uses skip connections to
+6
+https://wiki.python.org/moin/GlobalInterpreterLock
+8
+10 25 50 100 250 500 1000 2500
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+(a)
+10 25 50 100 250 500 1000 2500
+0.50
+0.55
+0.60
+0.65
+0.70
+0.75
+0.80
+0.85
+(b)
+Figure 6: Accuracy for the shortest path parity task (y − axis) for solving (a) one or (b) three tasks at
+the same time for different graph sizes (x−axis). The more accuracy drops between the left to the
+right figure, the more a method is exposed to oversquashing.
+previous states. The remaining setup is taken from Xu et al. [56]: We run on 10 different splits and
+report the accuracy of the best performing epoch. We use hidden node states of 64 for social datasets
+and 16 or 32 for biological datasets. We further compute results for GraphSAGE [20], GCN [26],
+and GAT [49] and take results for more GNNs. Table 4 shows all results.
+Even with little investigation into suitable AMP architectures and hyperparameter tuning, AMP
+achieves comparable results to existing GNN works but not quite state of the art. We believe that
+further improvements in AMP have the potential to reach a competitive performance. What surprised
+us are the results of GCN that clearly outperform all other methods on 3 out of 5 datasets.
+Model MUTAG PTC PROTEINS IMDB-B IMDB-M
+PatchySan [34] 92.6 ±4.2 62.3 ±5.7 75.9 ±2.8 71.0 ±2.2 45.2 ±2.8
+DGCNN [60] 85.8 ±1.7 58.6 ±2.5 75.5 ±0.9 70.0 ±0.9 47.8 ±0.9
+GraphSAGE [20] 90.4±7.8 63.7±9.7 75.6±5.5 76.0±3.3 51.9±4.9
+GCN [26] 88.9 ±7.6 79.1 ±11.4 76.9 ±4.8 83.4 ±4.9 57.5±2.6
+GAT [49] 85.1 ±9.3 64.5±7.0 75.4±3.8 74.9±3.8 52.0±3.0
+GIN [56] 89.4 ±5.6 66.6 ±6.9 76.2 ±2.6 75.1 ±5.1 52.3 ±2.8
+AMP-RNN (ours) 90.4±4.1 63.7 ±9.1 76.7±7.1 74.6±3.6 52.1±3.6
+1-2-3 GNN [33] 86.1 60.9 75.5 74.2 49.5
+DropGNN [36] 90.4 ±7.0 66.0±9.8 76.3 ±6.1 75.7 ±4.2 51.4 ±2.8
+PPGN [32]* 90.6 ±8.7 66.2 ±6.5 77.2 ±4.7 73 ±5.8 50.5 ±3.6
+ESAN [5]* 92.0±5.0 69.2±6.5 77.3 ±3.8 77.1±2.6 53.7±2.1
+Table 4: Graph classification accuracy (%). AMP produces results that are comparable to simple and
+new more expressive GNN variants. *We report the result achieved by the best model version model.
+6 Conclusion and Impact Statement
+In this paper, we presented a new paradigm for learning neural networks on graphs. In GNNs, which
+are inspired by synchronous distributed algorithms, every node sends a message to every neighbor in
+every round. Nodes aggregate all messages before parsing them, which leads to problems such as
+oversmoothing, underreaching, oversquashing, and being restricted in expressiveness by the 1−WL
+test. We present a new framework, AMP, that is inspired by the asynchronous communication model.
+We theoretically investigate its expressiveness and empirically evaluate its ability to distinguish hard
+graphs, propagate information over long distances, and classify common benchmarks. AMP might
+also be more interpretable if we investigate when nodes react or ignore a message.
+Impact Statement. We believe that AMP is a promising paradigm. GNNs have received a lot of
+attention over the years. New GNN variants have improved the original suggestions considerably. We
+believe that AMP deserves the same attention, and will improve accordingly. But before we can apply
+AMP to most real-world problems, we need improve tooling to allow parallelism and larger graphs.
+9
+References
+[1] U. Alon and E. Yahav. On the bottleneck of graph neural networks and its practical implications.
+In International Conference on Learning Representations (ICLR), 2021.
+[2] B. Awerbuch. Complexity of network synchronization. Journal of the ACM, 1985.
+[3] P. Barceló, E. Kostylev, M. Monet, J. Pérez, J. Reutter, and J.-P. Silva. The logical expressiveness
+of graph neural networks. In International Conference on Learning Representations (ICLR),
+2020.
+[4] P. W. Battaglia, J. B. Hamrick, V. Bapst, A. Sanchez-Gonzalez, V. Zambaldi, M. Malinowski,
+A. Tacchetti, D. Raposo, A. Santoro, R. Faulkner, et al. Relational inductive biases, deep
+learning, and graph networks. arXiv preprint arXiv:1806.01261, 2018.
+[5] B. Bevilacqua, F. Frasca, D. Lim, B. Srinivasan, C. Cai, G. Balamurugan, M. M. Bronstein,
+and H. Maron. Equivariant subgraph aggregation networks. In International Conference on
+Learning Representations (ICLR), 2022.
+[6] T. Bian, X. Xiao, T. Xu, P. Zhao, W. Huang, Y. Rong, and J. Huang. Rumor detection on
+social media with bi-directional graph convolutional networks. In AAAI conference on artificial
+intelligence (AAAI), 2020.
+[7] S. Brody, U. Alon, and E. Yahav. How attentive are graph attention networks? In International
+Conference on Learning Representations (ICLR), 2022.
+[8] R. Brüel-Gabrielsson, M. Yurochkin, and J. Solomon. Rewiring with positional encodings for
+graph neural networks. arXiv preprint arXiv:2201.12674, 2022.
+[9] D. Chen, Y. Lin, W. Li, P. Li, J. Zhou, and X. Sun. Measuring and relieving the over-smoothing
+problem for graph neural networks from the topological view. In AAAI Conference on Artificial
+Intelligence (AAAI), 2020.
+[10] M. Chen, Z. Wei, Z. Huang, B. Ding, and Y. Li. Simple and deep graph convolutional networks.
+In International Conference on Machine Learning (ICML), 2020.
+[11] Z. Chen, L. Chen, S. Villar, and J. Bruna. On the equivalence between graph isomorphism
+testing and function approximation with gnns. In Conference on Neural Information Processing
+Systems (NeurIPS), 2019.
+[12] K. Cho, B. van Merrienboer, Ç. Gülçehre, D. Bahdanau, F. Bougares, H. Schwenk, and
+Y. Bengio. Learning phrase representations using rnn encoder-decoder for statistical machine
+translation. In Empirical Methods in Natural Language Processing (EMNLP), 2014.
+[13] M. Dehghani, S. Gouws, O. Vinyals, J. Uszkoreit, and L. Kaiser. Universal transformers. In
+International Conference on Learning Representations (ICLR), 2018.
+[14] L. Faber and R. Wattenhofer. Neural status registers. arXiv preprint arXiv:2004.07085, 2020.
+[15] W. Feng, J. Zhang, Y. Dong, Y. Han, H. Luan, Q. Xu, Q. Yang, E. Kharlamov, and J. Tang.
+Graph random neural networks for semi-supervised learning on graphs. In Conference on
+Neural Information Processing Systems (NeurIPS), 2020.
+[16] V. Garg, S. Jegelka, and T. Jaakkola. Generalization and representational limits of graph neural
+networks. In International Conference on Machine Learning (ICML), 2020.
+[17] J. Gasteiger, J. Groß, and S. Günnemann. Directional message passing for molecular graphs. In
+International Conference on Learning Representations (ICLR), 2020.
+[18] J. Gilmer, S. S. Schoenholz, P. F. Riley, O. Vinyals, and G. E. Dahl. Neural message passing for
+quantum chemistry. In International Conference on Machine Learning (ICML), 2017.
+[19] A. Graves. Adaptive computation time for recurrent neural networks. arXiv preprint
+arXiv:1603.08983, 2016.
+10
+[20] W. Hamilton, Z. Ying, and J. Leskovec. Inductive representation learning on large graphs. In
+Conference on Neural Information Processing Systems (NeurIPS), volume 30, 2017.
+[21] A. Hasanzadeh, E. Hajiramezanali, S. Boluki, M. Zhou, N. Duffield, K. Narayanan, and X. Qian.
+Bayesian graph neural networks with adaptive connection sampling. In International Conference
+on Machine Learning (ICML), 2020.
+[22] N. Heim, T. Pevny, and V. Smidl. Neural power units. In Conference on Neural Information
+Processing Systems (NeurIPS), 2020.
+[23] S. Hochreiter and J. Schmidhuber. Long short-term memory. Neural computation, 1997.
+[24] J. Jumper, R. Evans, A. Pritzel, T. Green, M. Figurnov, O. Ronneberger, K. Tunyasuvunakool,
+R. Bates, A. Žídek, A. Potapenko, et al. Highly accurate protein structure prediction with
+alphafold. Nature, 2021.
+[25] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. In International
+Conference on Learning Representations (ICLR), 2015.
+[26] T. N. Kipf and M. Welling. Semi-supervised classification with graph convolutional networks.
+In International Conference on Learning Representations (ICLR), 2017.
+[27] J. Klicpera, S. Weißenberger, and S. Günnemann. Diffusion improves graph learning. In
+Conference on Neural Information Processing Systems (NeurIPS), 2019.
+[28] G. Li, M. Muller, A. Thabet, and B. Ghanem. Deepgcns: Can gcns go as deep as cnns? In IEEE
+international conference on computer vision (ICCV), pages 9267–9276, 2019.
+[29] Q. Li, Z. Han, and X.-M. Wu. Deeper insights into graph convolutional networks for semisupervised learning. In AAAI Conference on Artificial Intelligence (AAAI), 2018.
+[30] A. Loukas. What graph neural networks cannot learn: depth vs width. In International
+Conference on Learning Representations (ICLR), 2020.
+[31] A. Madsen and A. R. Johansen. Neural arithmetic units. In International Conference on
+Learning Representations (ICLR), 2020.
+[32] H. Maron, H. Ben-Hamu, H. Serviansky, and Y. Lipman. Provably powerful graph networks. In
+Conference on Neural Information Processing Systems (NeurIPS), 2019.
+[33] C. Morris, M. Ritzert, M. Fey, W. L. Hamilton, J. E. Lenssen, G. Rattan, and M. Grohe.
+Weisfeiler and leman go neural: Higher-order graph neural networks. In AAAI Conference on
+Artificial Intelligence (AAAI), 2019.
+[34] M. Niepert, M. Ahmed, and K. Kutzkov. Learning convolutional neural networks for graphs. In
+International conference on machine learning (ICML), 2016.
+[35] K. Oono and T. Suzuki. Graph neural networks exponentially lose expressive power for node
+classification. In International Conference on Learning Representations (ICLR), 2020.
+[36] P. A. Papp, K. Martinkus, L. Faber, and R. Wattenhofer. Dropgnn: random dropouts increase
+the expressiveness of graph neural networks. In Conference on Neural Information Processing
+Systems (NeurIPS), 2021.
+[37] D. Peleg. Distributed computing: a locality-sensitive approach. SIAM, 2000.
+[38] Y. Rong, W. Huang, T. Xu, and J. Huang. Dropedge: Towards deep graph convolutional
+networks on node classification. In International Conference on Learning Representations
+(ICLR), 2020.
+[39] H. L. Royden and P. Fitzpatrick. Real analysis. Macmillan New York, 1988.
+[40] A. D. Sarma, S. Holzer, L. Kor, A. Korman, D. Nanongkai, G. Pandurangan, D. Peleg, and
+R. Wattenhofer. Distributed verification and hardness of distributed approximation. SIAM
+Journal on Computing, 2012.
+11
+[41] R. Sato, M. Yamada, and H. Kashima. Approximation ratios of graph neural networks for
+combinatorial problems. In Conference on Neural Information Processing Systems (NeurIPS),
+2019.
+[42] R. Sato, M. Yamada, and H. Kashima. Random features strengthen graph neural networks. In
+SIAM International Conference on Data Mining (SDM), 2021.
+[43] F. Scarselli, M. Gori, A. C. Tsoi, M. Hagenbuchner, and G. Monfardini. The graph neural
+network model. IEEE transactions on neural networks, 2008.
+[44] N. Shervashidze, P. Schweitzer, E. J. Van Leeuwen, K. Mehlhorn, and K. M. Borgwardt.
+Weisfeiler-lehman graph kernels. Journal of Machine Learning Research, 2011.
+[45] I. Sutskever, O. Vinyals, and Q. V. Le. Sequence to sequence learning with neural networks. In
+Conference on Neural Information Processing Systems (NeurIPS), 2014.
+[46] H. Tang, Z. Huang, J. Gu, B.-L. Lu, and H. Su. Towards scale-invariant graph-related problem
+solving by iterative homogeneous gnns. Conference on Neural Information Processing Systems
+(NeurIPS), 2020.
+[47] J. Topping, F. Di Giovanni, B. P. Chamberlain, X. Dong, and M. M. Bronstein. Understanding
+over-squashing and bottlenecks on graphs via curvature. In International Conference on
+Learning Representations (ICLR), 2022.
+[48] A. Trask, F. Hill, S. E. Reed, J. Rae, C. Dyer, and P. Blunsom. Neural arithmetic logic units. In
+Conference on Neural Information Processing Systems (NeurIPS), 2018.
+[49] P. Velickovi ˇ c, G. Cucurull, A. Casanova, A. Romero, P. Lio, and Y. Bengio. Graph attention ´
+networks. In International Conference on Learning Representations (ICLR), 2018.
+[50] P. Velickovic, R. Ying, M. Padovano, R. Hadsell, and C. Blundell. Neural execution of graph
+algorithms. In International Conference on Learning Representations (ICLR), 2020.
+[51] C. Vignac, A. Loukas, and P. Frossard. Building powerful and equivariant graph neural networks
+with structural message-passing. In Conference on Neural Information Processing Systems
+(NeurIPS), 2020.
+[52] R. Wattenhofer. Mastering Distributed Algorithms. Inverted Forest Publishing, 2020.
+[53] Z. Wu, S. Pan, F. Chen, G. Long, C. Zhang, and S. Y. Philip. A comprehensive survey on graph
+neural networks. IEEE transactions on neural networks and learning systems, 2020.
+[54] Z. Wu, P. Jain, M. Wright, A. Mirhoseini, J. E. Gonzalez, and I. Stoica. Representing long-range
+context for graph neural networks with global attention. In Conference on Neural Information
+Processing Systems (NeurIPS), 2021.
+[55] K. Xu, C. Li, Y. Tian, T. Sonobe, K.-i. Kawarabayashi, and S. Jegelka. Representation learning
+on graphs with jumping knowledge networks. In International Conference on Machine Learning
+(ICML), 2018.
+[56] K. Xu, W. Hu, J. Leskovec, and S. Jegelka. How powerful are graph neural networks? In
+International Conference on Learning Representations( ICLR), 2019.
+[57] K. Xu, J. Li, M. Zhang, S. S. Du, K. Kawarabayashi, and S. Jegelka. What can neural networks
+reason about? In International Conference on Learning Representations (ICLR), 2020.
+[58] K. Xu, M. Zhang, J. Li, S. S. Du, K.-i. Kawarabayashi, and S. Jegelka. How neural networks
+extrapolate: from feedforward to graph neural networks. In International Conference on
+Learning Representations (ICLR), 2021.
+[59] P. Yanardag and S. Vishwanathan. Deep graph kernels. In ACM SIGKDD Conference on
+Knowledge Discovery & Data Mining (KDD), 2015.
+[60] M. Zhang, Z. Cui, M. Neumann, and Y. Chen. An end-to-end deep learning architecture for
+graph classification. In AAAI Conference on Artificial Intelligence (AAAI), 2018.
